@@ -1,87 +1,100 @@
 <script lang="ts">
+  import Card from '$/components/Card/Card.svelte';
+  import CopyButton from '$/components/CopyButton.svelte';
+  import CopyInput from '$/components/CopyInput.svelte';
+  import ExternalLinkWrapper from '$/components/ExternalLinkWrapper.svelte';
+  import { Button } from '$/components/ui/button';
+  import { Input } from '$/components/ui/input';
+  import { Separator } from '$/components/ui/separator';
+  import * as ToggleGroup from '$/components/ui/toggle-group';
+  import { TID } from '$/constants';
+  import { getDomain } from '$/util/util';
   import { browser } from '$app/environment';
-  import Card from '$lib/components/Card/Card.svelte';
   import { waitForRender } from '$lib/util/autoSync';
-  import { env } from '$lib/util/env';
-  import { pakoSerde } from '$lib/util/serde';
-  import { stateStore } from '$lib/util/state';
+  import { inputState, updateCodeStore, urls, validatedState } from '$lib/util/state.svelte';
   import { logEvent } from '$lib/util/stats';
+  import { version as FAVersion } from '@fortawesome/fontawesome-free/package.json';
   import dayjs from 'dayjs';
   import { toBase64 } from 'js-base64';
+  import DownloadIcon from '~icons/material-symbols/download';
+  import ExternalLinkIcon from '~icons/material-symbols/open-in-new-rounded';
+  import WidthIcon from '~icons/material-symbols/width-rounded';
 
-  const { krokiRendererUrl, rendererUrl } = env;
+  const FONT_AWESOME_URL = `https://cdnjs.cloudflare.com/ajax/libs/font-awesome/${FAVersion}/css/all.min.css`;
+
   type Exporter = (context: CanvasRenderingContext2D, image: HTMLImageElement) => () => void;
 
   const getFileName = (extension: string) =>
     `mermaid-diagram-${dayjs().format('YYYY-MM-DD-HHmmss')}.${extension}`;
+
+  /**
+   * Fix text clipping in exported SVG for hand-drawn (rough) mode.
+   * svg2roughjs copies foreignObject elements but their height is often insufficient,
+   * causing text bottom edges to be cut off regardless of language.
+   */
+  const fixForeignObjectClipping = (svg: HTMLElement) => {
+    const foreignObjects = svg.querySelectorAll('foreignObject');
+    foreignObjects.forEach((foreignObj) => {
+      const currentHeight = parseFloat(foreignObj.getAttribute('height') || '0');
+      if (currentHeight <= 0) return;
+
+      const currentY = parseFloat(foreignObj.getAttribute('y') || '0');
+      const newHeight = currentHeight * 1.5;
+      const heightDiff = newHeight - currentHeight;
+
+      foreignObj.setAttribute('height', newHeight.toString());
+      foreignObj.setAttribute('y', (currentY - heightDiff / 2).toString());
+
+      // Ensure inner HTML elements are vertically centered within the expanded area
+      const htmlElements = foreignObj.querySelectorAll('div, span, p');
+      htmlElements.forEach((htmlEl) => {
+        const el = htmlEl as HTMLElement;
+        el.style.display = 'flex';
+        el.style.alignItems = 'center';
+        el.style.justifyContent = 'center';
+        el.style.height = '100%';
+      });
+    });
+  };
+
+  const getSvgElement = () => {
+    const svgElement = document.querySelector('#container svg')?.cloneNode(true) as HTMLElement;
+    svgElement.setAttribute('xmlns:xlink', 'http://www.w3.org/1999/xlink');
+    return svgElement;
+  };
 
   const getBase64SVG = (svg?: HTMLElement, width?: number, height?: number): string => {
     if (svg) {
       // Prevents the SVG size of the interface from being changed
       svg = svg.cloneNode(true) as HTMLElement;
     }
-    height && svg?.setAttribute('height', `${height}px`);
-    width && svg?.setAttribute('width', `${width}px`); // Workaround https://stackoverflow.com/questions/28690643/firefox-error-rendering-an-svg-image-to-html5-canvas-with-drawimage
+    if (height) {
+      svg?.setAttribute('height', `${height}px`);
+    }
+    if (width) {
+      svg?.setAttribute('width', `${width}px`);
+    }
+    // Workaround https://stackoverflow.com/questions/28690643/firefox-error-rendering-an-svg-image-to-html5-canvas-with-drawimage
+
     if (!svg) {
       svg = getSvgElement();
     }
+
+    if (validatedState.current.rough) {
+      fixForeignObjectClipping(svg);
+    }
+
+    svg.style.backgroundColor = window
+      .getComputedStyle(document.body)
+      .getPropertyValue('--background');
+
     const svgString = svg.outerHTML
       .replaceAll('<br>', '<br/>')
       .replaceAll(/<img([^>]*)>/g, (m, g: string) => `<img ${g} />`);
-    return toBase64(svgString);
-  };
 
-  const exportImage = async (event: Event, exporter: Exporter) => {
-    await waitForRender();
-    if (document.querySelector('.outOfSync')) {
-      throw new Error('Diagram is out of sync');
-    }
-    const canvas: HTMLCanvasElement = document.createElement('canvas');
-    const svg = document.querySelector<HTMLElement>('#container svg');
-    if (!svg) {
-      throw new Error('svg not found');
-    }
-    const box: DOMRect = svg.getBoundingClientRect();
-    canvas.width = box.width;
-    canvas.height = box.height;
-    if (imagemodeselected === 'width') {
-      const ratio = box.height / box.width;
-      canvas.width = userimagesize;
-      canvas.height = userimagesize * ratio;
-    } else if (imagemodeselected === 'height') {
-      const ratio = box.width / box.height;
-      canvas.width = userimagesize * ratio;
-      canvas.height = userimagesize;
-    }
-
-    const context = canvas.getContext('2d');
-    if (!context) {
-      throw new Error('context not found');
-    }
-    context.fillStyle = `hsl(${window.getComputedStyle(document.body).getPropertyValue('--b1')})`;
-    context.fillRect(0, 0, canvas.width, canvas.height);
-
-    const image = new Image();
-    image.addEventListener('load', exporter(context, image));
-    image.src = `data:image/svg+xml;base64,${getBase64SVG(svg, canvas.width, canvas.height)}`;
-
-    event.stopPropagation();
-    event.preventDefault();
-  };
-
-  const getSvgElement = () => {
-    const svgElement = document.querySelector('#container svg')?.cloneNode(true) as HTMLElement;
-    svgElement.setAttribute('xmlns:xlink', 'http://www.w3.org/1999/xlink');
-    const fontAwesomeCdnUrl = [...document.head.querySelectorAll('link')]
-      .map((link) => link.href)
-      .find((url) => url.includes('font-awesome'));
-    if (fontAwesomeCdnUrl == null) {
-      return svgElement;
-    }
-    const styleElement = document.createElement('style');
-    styleElement.textContent = `@import url("${fontAwesomeCdnUrl}");'`;
-    svgElement.prepend(styleElement);
-    return svgElement;
+    return toBase64(`<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet href="${FONT_AWESOME_URL}" type="text/css"?>
+${svgString}`);
   };
 
   const simulateDownload = (download: string, href: string): void => {
@@ -91,6 +104,65 @@
     a.click();
     a.remove();
   };
+
+  const exportImage = async (event: Event, exporter: Exporter) => {
+    updateCodeStore({ panZoom: false });
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    await waitForRender();
+    const canvas = document.createElement('canvas');
+    const svg = document.querySelector<HTMLElement>('#container svg');
+    if (!svg) {
+      throw new Error('svg not found');
+    }
+
+    const box = svg.getBoundingClientRect();
+
+    // In rough mode, SVG has width/height="100%" so getBoundingClientRect returns
+    // the container size, not the actual diagram size. Use viewBox dimensions instead.
+    const svgEl = svg as unknown as SVGSVGElement;
+    const viewBox = svgEl.viewBox?.baseVal;
+    const contentWidth = viewBox && viewBox.width > 0 ? viewBox.width : box.width;
+    const contentHeight = viewBox && viewBox.height > 0 ? viewBox.height : box.height;
+
+    if (imageSizeMode === 'width') {
+      const ratio = contentHeight / contentWidth;
+      canvas.width = imageSize;
+      canvas.height = imageSize * ratio;
+    } else if (imageSizeMode === 'height') {
+      const ratio = contentWidth / contentHeight;
+      canvas.width = imageSize * ratio;
+      canvas.height = imageSize;
+    } else {
+      const multiplier = 2;
+      canvas.width = contentWidth * multiplier;
+      canvas.height = contentHeight * multiplier;
+    }
+
+    const context = canvas.getContext('2d');
+    if (!context) {
+      throw new Error('context not found');
+    }
+
+    context.fillStyle = window.getComputedStyle(document.body).getPropertyValue('--background');
+    context.fillRect(0, 0, canvas.width, canvas.height);
+
+    const image = new Image();
+    image.addEventListener('load', () => {
+      exporter(context, image)();
+      updateCodeStore({ panZoom: true });
+    });
+    image.src = `data:image/svg+xml;base64,${getBase64SVG(svg, canvas.width, canvas.height)}`;
+    // Fallback to set panZoom to true after 2 seconds
+    // This is a workaround for the case when the image is not loaded
+    setTimeout(() => {
+      if (!inputState.panZoom) {
+        updateCodeStore({ panZoom: true });
+      }
+    }, 2000);
+    event.stopPropagation();
+    event.preventDefault();
+  };
+
   const downloadImage: Exporter = (context, image) => {
     return () => {
       const { canvas } = context;
@@ -103,7 +175,7 @@
   };
 
   const isClipboardAvailable = (): boolean => {
-    return Object.prototype.hasOwnProperty.call(window, 'ClipboardItem') as boolean;
+    return Object.prototype.hasOwnProperty.call(window, 'ClipboardItem');
   };
 
   const clipboardCopy: Exporter = (context, image) => {
@@ -127,7 +199,10 @@
     };
   };
 
-  const onCopyClipboard = async (event: Event) => {
+  const onCopyClipboard = async (event?: Event) => {
+    if (!event) {
+      return;
+    }
     await exportImage(event, clipboardCopy);
     logEvent('copyClipboard');
   };
@@ -146,120 +221,96 @@
     });
   };
 
-  const onCopyMarkdown = () => {
-    document.querySelector<HTMLInputElement>('#markdown')?.select();
-    document.execCommand('Copy');
-    logEvent('copyMarkdown');
-  };
-
-  let gistURL = '';
-  stateStore.subscribe(({ loader }) => {
+  let gistURL = $state('');
+  $effect(() => {
+    const { loader } = validatedState.current;
     if (loader?.type === 'gist') {
-      // @ts-expect-error Gist will have url
       gistURL = loader.config.url;
     }
   });
 
   const loadGist = () => {
     if (!gistURL) {
-      alert('Please enter a Gist URL first');
+      return alert('Please enter a Gist URL first');
     }
     window.location.href = `${window.location.pathname}?gist=${gistURL}`;
     logEvent('loadGist');
   };
 
-  let iUrl: string;
-  let svgUrl: string;
-  let krokiUrl: string;
-  let mdCode: string;
-  let imagemodeselected = 'auto';
-  let userimagesize = 1080;
+  let imageSizeMode: 'auto' | 'width' | 'height' = $state('auto');
 
-  let isNetlify = false;
-  if (browser && ['mermaid.live', 'netlify'].some((path) => window.location.host.includes(path))) {
-    isNetlify = true;
-  }
-  stateStore.subscribe(({ code, serialized }) => {
-    iUrl = `${rendererUrl}/img/${serialized}?type=png`;
-    svgUrl = `${rendererUrl}/svg/${serialized}`;
-    krokiUrl = `${krokiRendererUrl}/mermaid/svg/${pakoSerde.serialize(code)}`;
-    mdCode = `[![](${iUrl})](${window.location.protocol}//${window.location.host}${window.location.pathname}#${serialized})`;
+  $effect(() => {
+    if (!imageSizeMode) {
+      imageSizeMode = 'auto';
+    }
   });
+
+  let imageSize = $state(1080);
+
+  const isNetlify = browser && window.location.host.includes('netlify');
 </script>
 
-<Card title="Actions" isOpen={false}>
-  <div class="m-2 flex flex-wrap gap-2">
-    {#if isClipboardAvailable()}
-      <button class="action-btn w-full" on:click={onCopyClipboard}
-        ><i class="far fa-copy mr-2" /> Copy Image to clipboard
-      </button>
-    {/if}
-    <button id="downloadPNG" class="action-btn flex-grow" on:click={onDownloadPNG}>
-      <i class="fas fa-download mr-2" /> PNG
-    </button>
-    <button id="downloadSVG" class="action-btn flex-grow" on:click={onDownloadSVG}>
-      <i class="fas fa-download mr-2" /> SVG
-    </button>
-    <a target="_blank" rel="noreferrer" class="flex-grow" href={iUrl}>
-      <button class="action-btn w-full">
-        <i class="fas fa-external-link-alt mr-2" /> PNG
-      </button>
-    </a>
-    <a target="_blank" rel="noreferrer" class="flex-grow" href={svgUrl}>
-      <button class="action-btn w-full">
-        <i class="fas fa-external-link-alt mr-2" /> SVG
-      </button>
-    </a>
-    <a target="_blank" rel="noreferrer" class="flex-grow" href={krokiUrl}>
-      <button class="action-btn w-full">
-        <i class="fas fa-external-link-alt mr-2" /> Kroki
-      </button>
-    </a>
+{#snippet dualActionButton(text: string, download: (event: Event) => unknown, url?: string)}
+  <div class="flex flex-grow gap-0.5">
+    <Button
+      class={['flex-grow', url && 'rounded-r-none']}
+      onclick={download}
+      data-testid="download-{text}">
+      <DownloadIcon />
+      {text}
+    </Button>
+    <ExternalLinkWrapper domain={getDomain(url)} isVisible={!!url}>
+      <Button class="rounded-l-none" href={url} target="_blank" rel="noreferrer noopener">
+        <ExternalLinkIcon />
+      </Button>
+    </ExternalLinkWrapper>
+  </div>
+{/snippet}
 
-    <div class="flex items-center gap-2">
+<Card title="Actions" isStackable icon={{ component: DownloadIcon, class: 'rotate-180' }}>
+  <div class="flex min-w-fit flex-col gap-2 p-2">
+    <div class="flex w-full items-center gap-2 py-2 whitespace-nowrap">
       PNG size
-      <label for="autosize">
-        <input type="radio" value="auto" id="autosize" bind:group={imagemodeselected} /> Auto
-      </label>
-
-      <label for="width">
-        <input type="radio" value="width" id="width" bind:group={imagemodeselected} /> Width
-      </label>
-
-      <label for="height">
-        <input type="radio" value="height" id="height" bind:group={imagemodeselected} /> Height
-      </label>
-
-      {#if imagemodeselected !== 'auto'}
-        <input
-          id="height"
-          class="input"
-          type="number"
-          min="3"
-          max="10000"
-          bind:value={userimagesize} />
+      <ToggleGroup.Root type="single" variant="outline" bind:value={imageSizeMode}>
+        <ToggleGroup.Item value="auto">Auto</ToggleGroup.Item>
+        <ToggleGroup.Item value="width">Width</ToggleGroup.Item>
+        <ToggleGroup.Item value="height">Height</ToggleGroup.Item>
+      </ToggleGroup.Root>
+      {#if imageSizeMode !== 'auto'}
+        <WidthIcon
+          class={['size-6 shrink-0 transition-all', imageSizeMode === 'width' && 'rotate-90']} />
       {/if}
+      <Input
+        type="number"
+        min="3"
+        max="10000"
+        disabled={imageSizeMode === 'auto'}
+        bind:value={imageSize} />
     </div>
-
-    <div class="flex w-full items-center gap-2">
-      <input class="input" id="markdown" type="text" value={mdCode} on:click={onCopyMarkdown} />
-      <label for="markdown">
-        <button class="btn btn-primary btn-md flex-auto" on:click={onCopyMarkdown}>
-          Copy Markdown
-        </button>
-      </label>
+    <div class="flex gap-2">
+      {@render dualActionButton('PNG', onDownloadPNG, urls.current.png)}
+      {@render dualActionButton('SVG', onDownloadSVG, urls.current.svg)}
+      <ExternalLinkWrapper domain={getDomain(urls.current.kroki)} isVisible={!!urls.current.kroki}>
+        <a target="_blank" rel="noreferrer" class="flex-grow" href={urls.current.kroki}>
+          <Button class="action-btn flex w-full items-center gap-2">
+            <ExternalLinkIcon /> Kroki
+          </Button>
+        </a>
+      </ExternalLinkWrapper>
     </div>
-
+    <Separator />
+    {#if isClipboardAvailable()}
+      <CopyButton onclick={onCopyClipboard} label="Copy Image" />
+    {/if}
+    <ExternalLinkWrapper
+      labelPrefix="Thumbnail generated by"
+      domain={getDomain(urls.current.png)}
+      isVisible={!!urls.current.mdCode}>
+      <CopyInput value={urls.current.mdCode} label="Copy Markdown" testID={TID.copyMarkdown} />
+    </ExternalLinkWrapper>
     <div class="flex w-full items-center gap-2">
-      <input
-        class="input"
-        id="gist"
-        type="text"
-        bind:value={gistURL}
-        placeholder="Enter Gist URL" />
-      <label for="gist">
-        <button class="btn btn-primary btn-md flex-auto" on:click={loadGist}> Load Gist </button>
-      </label>
+      <Input type="url" bind:value={gistURL} placeholder="Enter Gist URL" />
+      <Button onclick={loadGist}>Load Gist</Button>
     </div>
     {#if isNetlify}
       <div class="flex w-full items-center justify-center">

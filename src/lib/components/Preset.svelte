@@ -1,188 +1,110 @@
 <script lang="ts">
-  import { updateCode } from '$lib/util/state';
-  import Card from '$lib/components/Card/Card.svelte';
+  import Card from '$/components/Card/Card.svelte';
+  import { Button, buttonVariants } from '$/components/ui/button';
+  import * as Popover from '$/components/ui/popover';
+  import { getSampleDiagrams, type SampleExample } from '$/util/mermaid';
+  import { updateCode } from '$lib/util/state.svelte';
   import { logEvent } from '$lib/util/stats';
+  import { cn } from '$lib/utils';
+  import ShapesIcon from '~icons/material-symbols/account-tree-outline-rounded';
+  import ChevronDownIcon from '~icons/material-symbols/keyboard-arrow-down-rounded';
 
-  const samples = {
-    Flow: `flowchart TD
-    A[Christmas] -->|Get money| B(Go shopping)
-    B --> C{Let me think}
-    C -->|One| D[Laptop]
-    C -->|Two| E[iPhone]
-    C -->|Three| F[fa:fa-car Car]`,
-    Sequence: `sequenceDiagram
-    Alice->>+John: Hello John, how are you?
-    Alice->>+John: John, can you hear me?
-    John-->>-Alice: Hi Alice, I can hear you!
-    John-->>-Alice: I feel great!`,
-    Class: `classDiagram
-    Animal <|-- Duck
-    Animal <|-- Fish
-    Animal <|-- Zebra
-    Animal : +int age
-    Animal : +String gender
-    Animal: +isMammal()
-    Animal: +mate()
-    class Duck{
-      +String beakColor
-      +swim()
-      +quack()
+  const extras: Record<string, SampleExample[]> = {
+    ZenUML: [
+      {
+        title: 'Order Service',
+        isDefault: true,
+        code: `zenuml
+    title Order Service
+    @Actor Client #FFEBE6
+    @Boundary OrderController #0747A6
+    @EC2 <<BFF>> OrderService #E3FCEF
+    group BusinessService {
+      @Lambda PurchaseService
+      @AzureFunction InvoiceService
     }
-    class Fish{
-      -int sizeInFeet
-      -canEat()
-    }
-    class Zebra{
-      +bool is_wild
-      +run()
-    }`,
-    State: `stateDiagram-v2
-    [*] --> Still
-    Still --> [*]
-    Still --> Moving
-    Moving --> Still
-    Moving --> Crash
-    Crash --> [*]`,
-    Gantt: `gantt
-    title A Gantt Diagram
-    dateFormat  YYYY-MM-DD
-    section Section
-    A task           :a1, 2014-01-01, 30d
-    Another task     :after a1  , 20d
-    section Another
-    Task in sec      :2014-01-12  , 12d
-    another task      : 24d`,
-    Pie: `pie title Pets adopted by volunteers
-    "Dogs" : 386
-    "Cats" : 85
-    "Rats" : 15`,
-    ER: `erDiagram
-    CUSTOMER }|..|{ DELIVERY-ADDRESS : has
-    CUSTOMER ||--o{ ORDER : places
-    CUSTOMER ||--o{ INVOICE : "liable for"
-    DELIVERY-ADDRESS ||--o{ ORDER : receives
-    INVOICE ||--|{ ORDER : covers
-    ORDER ||--|{ ORDER-ITEM : includes
-    PRODUCT-CATEGORY ||--|{ PRODUCT : contains
-    PRODUCT ||--o{ ORDER-ITEM : "ordered in"`,
-    'User Journey': `journey
-    title My working day
-    section Go to work
-      Make tea: 5: Me
-      Go upstairs: 3: Me
-      Do work: 1: Me, Cat
-    section Go home
-      Go downstairs: 5: Me
-      Sit down: 3: Me`,
-    Git: `gitGraph
-    commit
-    commit
-    branch develop
-    checkout develop
-    commit
-    commit
-    checkout main
-    merge develop
-    commit
-    commit`,
-    Mindmap: `mindmap
-  root((mindmap))
-    Origins
-      Long history
-      ::icon(fa fa-book)
-      Popularisation
-        British popular psychology author Tony Buzan
-    Research
-      On effectivness<br/>and features
-      On Automatic creation
-        Uses
-            Creative techniques
-            Strategic planning
-            Argument mapping
-    Tools
-      Pen and paper
-      Mermaid`,
-    QuadrantChart: `quadrantChart
-    title Reach and engagement of campaigns
-    x-axis Low Reach --> High Reach
-    y-axis Low Engagement --> High Engagement
-    quadrant-1 We should expand
-    quadrant-2 Need to promote
-    quadrant-3 Re-evaluate
-    quadrant-4 May be improved
-    Campaign A: [0.3, 0.6]
-    Campaign B: [0.45, 0.23]
-    Campaign C: [0.57, 0.69]
-    Campaign D: [0.78, 0.34]
-    Campaign E: [0.40, 0.34]
-    Campaign F: [0.35, 0.78]`,
-    XYChart: `
-    xychart-beta
-    title "Sales Revenue"
-    x-axis [jan, feb, mar, apr, may, jun, jul, aug, sep, oct, nov, dec]
-    y-axis "Revenue (in $)" 4000 --> 11000
-    bar [5000, 6000, 7500, 8200, 9500, 10500, 11000, 10200, 9200, 8500, 7000, 6000]
-    line [5000, 6000, 7500, 8200, 9500, 10500, 11000, 10200, 9200, 8500, 7000, 6000]`,
-    Block: `block-beta
-    columns 3
-    doc>"Document"]:3
-    space down1<[" "]>(down) space
 
-  block:e:3
-          l["left"]
-          m("A wide one in the middle")
-          r["right"]
-  end
-    space down2<[" "]>(down) space
-    db[("DB")]:3
-    space:3
-    D space C
-    db --> D
-    C --> db
-    D --> C
-    style m fill:#d6d,stroke:#333,stroke-width:4px
+    @Starter(Client)
+    // \`POST /orders\`
+    OrderController.post(payload) {
+      OrderService.create(payload) {
+        order = new Order(payload)
+        if(order != null) {
+          par {
+            PurchaseService.createPO(order)
+            InvoiceService.createInvoice(order)
+          }
+        }
+      }
+    }
     `
+      }
+    ]
   };
 
-  type SampleTypes = keyof typeof samples;
-  const loadSampleDiagram = (diagramType: SampleTypes): void => {
-    updateCode(samples[diagramType], {
-      updateDiagram: true,
-      resetPanZoom: true
+  const samples = { ...getSampleDiagrams(), ...extras };
+
+  const loadSampleDiagram = (diagramType: string, example: SampleExample): void => {
+    updateCode(example.code, {
+      resetPanZoom: true,
+      updateDiagram: true
     });
-    logEvent('loadSampleDiagram', { diagramType });
+    logEvent('loadSampleDiagram', { diagramType, exampleTitle: example.title });
   };
 
-  // Adding in this array will add an icon to the preset menu
-  const newDiagrams: SampleTypes[] = ['QuadrantChart', 'XYChart', 'Block'];
-  const diagramOrder: SampleTypes[] = [
-    'Flow',
-    'Sequence',
+  const mainDiagrams = [
+    'Flowchart',
     'Class',
+    'Sequence',
+    'Entity Relationship',
     'State',
-    'ER',
-    'Gantt',
-    'User Journey',
-    'Git',
-    'Pie',
-    'Mindmap',
-    'QuadrantChart',
-    'XYChart',
-    'Block'
+    'Mindmap'
+  ];
+
+  const diagramOrder = [
+    ...mainDiagrams,
+    ...Object.keys(samples)
+      .filter((key) => !mainDiagrams.includes(key))
+      .sort()
   ];
 </script>
 
-<Card title="Sample Diagrams" isOpen={false}>
-  <div class="flex flex-wrap gap-2 p-2">
-    {#each diagramOrder as sample}
-      <button
-        class="btn btn-primary btn-sm w-fit min-w-20 flex-grow normal-case"
-        on:click={() => loadSampleDiagram(sample)}>
-        {sample}
-        {#if newDiagrams.includes(sample)}
-          <span class="fa fa-heart ml-2" />
+<Card title="Sample Diagrams" isOpen isStackable icon={{ component: ShapesIcon }}>
+  <div class="flex h-fit max-h-52 flex-wrap gap-2 overflow-y-auto p-2">
+    {#each diagramOrder as sample (sample)}
+      {@const examples = samples[sample]}
+      <div class="flex min-w-20 flex-grow">
+        <Button
+          size="sm"
+          class={cn('flex-grow normal-case', examples.length > 1 && 'rounded-r-none')}
+          onclick={() => loadSampleDiagram(sample, examples[0])}>
+          {sample}
+        </Button>
+        {#if examples.length > 1}
+          <Popover.Root>
+            <Popover.Trigger
+              aria-label="Choose a {sample} example"
+              class={cn(
+                buttonVariants({ size: 'sm' }),
+                'rounded-l-none border-l border-primary-foreground/30 px-0.5 [&_svg]:size-5'
+              )}>
+              <ChevronDownIcon />
+            </Popover.Trigger>
+            <Popover.Content align="start" class="flex w-fit flex-col gap-1 p-1">
+              {#each examples as example (example.title)}
+                <Popover.Close
+                  class={cn(
+                    buttonVariants({ variant: 'ghost', size: 'sm' }),
+                    'justify-start normal-case'
+                  )}
+                  onclick={() => loadSampleDiagram(sample, example)}>
+                  {example.title}
+                </Popover.Close>
+              {/each}
+            </Popover.Content>
+          </Popover.Root>
         {/if}
-      </button>
+      </div>
     {/each}
   </div>
 </Card>

@@ -1,45 +1,65 @@
 <script lang="ts">
   import Card from '$lib/components/Card/Card.svelte';
-  import { inputStateStore, getStateString } from '$lib/util/state';
-  import {
-    addHistoryEntry,
-    historyModeStore,
-    clearHistoryData,
-    getPreviousState,
-    historyStore,
-    loaderHistoryStore,
-    restoreHistory
-  } from './history';
+  import type { HistoryEntry, HistoryType, State, Tab } from '$lib/types';
   import { notify, prompt } from '$lib/util/notify';
-  import { onMount } from 'svelte';
-  import { get } from 'svelte/store';
+  import { serializeState } from '$lib/util/serde';
+  import { inputState, replaceInputState } from '$lib/util/state.svelte';
+  import { logEvent } from '$lib/util/stats';
   import dayjs from 'dayjs';
   import dayjsRelativeTime from 'dayjs/plugin/relativeTime';
-  import type { HistoryEntry, HistoryType, State, Tab } from '$lib/types';
-  import { logEvent } from '$lib/util/stats';
+  import BookmarkIcon from '~icons/material-symbols/bookmark-outline-rounded';
+  import TrashAltIcon from '~icons/material-symbols/delete-outline-rounded';
+  import DownloadIcon from '~icons/material-symbols/download-rounded';
+  import SaveIcon from '~icons/material-symbols/save-outline-rounded';
+  import UndoIcon from '~icons/material-symbols/settings-backup-restore-rounded';
+  import UploadIcon from '~icons/material-symbols/upload-rounded';
+  import HistoryIcon from '~icons/mdi/clock-outline';
+  import GitAltIcon from '~icons/mdi/git';
+  import OpenInNewIcon from '~icons/material-symbols/open-in-new-rounded';
+  import { Button } from '../ui/button';
+  import { Separator } from '../ui/separator';
+  import {
+    addManualEntry,
+    clearActive,
+    historyState,
+    removeEntry,
+    restoreEntries,
+    setMode
+  } from './historyState.svelte';
 
   dayjs.extend(dayjsRelativeTime);
 
-  const HISTORY_SAVE_INTERVAL = 60_000;
-
-  const tabSelectHandler = (message: CustomEvent<Tab>) => {
-    historyModeStore.set(message.detail.id as HistoryType);
-  };
-  let tabs: Tab[] = [
-    {
-      id: 'manual',
-      title: 'Saved',
-      icon: 'far fa-bookmark'
-    },
-    {
-      id: 'auto',
-      title: 'Timeline',
-      icon: 'fas fa-history'
-    }
+  const baseTabs: Tab[] = [
+    { id: 'manual', title: 'Saved', icon: BookmarkIcon },
+    { id: 'auto', title: 'Timeline', icon: HistoryIcon }
   ];
+  const loaderTab: Tab = { id: 'loader', title: 'Revisions', icon: GitAltIcon };
+
+  const tabs = $derived(
+    historyState.loaderEntries.length > 0 ? [loaderTab, ...baseTabs] : baseTabs
+  );
+
+  // Surface revisions once when they first appear; the user can switch away after.
+  let revisionsShown = false;
+  $effect(() => {
+    if (historyState.loaderEntries.length > 0 && !revisionsShown) {
+      revisionsShown = true;
+      setMode('loader');
+    }
+  });
+
+  const emptyMessage = $derived(
+    historyState.mode === 'auto'
+      ? 'No timeline snapshots yet.\nThe Timeline is saved automatically every minute.'
+      : 'No saved states yet.\nClick the Save button to bookmark the current diagram and restore it later.'
+  );
+
+  const tabSelectHandler = (tab: Tab) => {
+    setMode(tab.id as HistoryType);
+  };
 
   const downloadHistory = () => {
-    const data = get(historyStore);
+    const data = historyState.entries;
     const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -47,9 +67,7 @@
     a.download = `mermaid-history-${dayjs().format('YYYY-MM-DD-HHmmss')}.json`;
     a.click();
     URL.revokeObjectURL(url);
-    logEvent('history', {
-      action: 'download'
-    });
+    logEvent('history', { action: 'download' });
   };
 
   const uploadHistory = () => {
@@ -62,129 +80,130 @@
         return;
       }
       const data: HistoryEntry[] = JSON.parse(await file.text());
-      restoreHistory(data);
+      const { restored, invalid, duplicates } = restoreEntries(data);
+      notify(`${restored} restored, ${duplicates} duplicate, ${invalid} invalid.`);
     });
     input.click();
   };
 
-  const saveHistory = (auto = false) => {
-    const currentState: string = getStateString();
-    const previousState: string = getPreviousState(auto);
-    if (previousState !== currentState) {
-      addHistoryEntry({
-        state: $inputStateStore,
-        time: Date.now(),
-        type: auto ? 'auto' : 'manual'
-      });
-    } else if (!auto) {
+  const saveHistory = () => {
+    if (!addManualEntry($state.snapshot(inputState))) {
       notify('State already saved.');
     }
   };
 
-  const clearHistory = (id?: string): void => {
-    if (!id && !prompt('Clear all saved items?')) {
-      return;
+  const clearAll = () => {
+    if (prompt('Clear all saved items?')) {
+      clearActive();
     }
-    clearHistoryData(id);
   };
 
   const restoreHistoryItem = (state: State): void => {
-    inputStateStore.set({ ...state, updateDiagram: true });
+    replaceInputState({ ...state, updateDiagram: true });
   };
 
-  const relativeTime = (time: number) => {
-    const t = new Date(time);
-    return `${new Date(t).toLocaleString()} (${dayjs(t).fromNow()})`;
-  };
+  // Absolute editor URL for an entry, so the link can be opened in a new tab or copied.
+  const entryUrl = (state: State): string =>
+    `${window.location.origin}${window.location.pathname}#${serializeState(state)}`;
 
-  onMount(() => {
-    historyModeStore.set('manual');
-    setInterval(() => {
-      saveHistory(true);
-    }, HISTORY_SAVE_INTERVAL);
-  });
-
-  loaderHistoryStore.subscribe((entries) => {
-    if (entries.length > 0 && tabs.length === 2) {
-      tabs = [
-        {
-          id: 'loader',
-          title: 'Revisions',
-          icon: 'fab fa-git-alt'
-        },
-        ...tabs
-      ];
-      historyModeStore.set('loader');
-    }
-  });
-
-  let isOpen = false;
+  // Serialize each entry's URL once per change rather than per row on every render.
+  const entriesWithUrl = $derived(
+    historyState.entries.map((entry) => ({ ...entry, openUrl: entryUrl(entry.state) }))
+  );
 </script>
 
-<Card on:select={tabSelectHandler} bind:isOpen {tabs} title="History">
-  <div slot="actions">
-    <button
-      id="uploadHistory"
-      class="btn btn-secondary btn-xs w-12"
-      on:click|stopPropagation={() => uploadHistory()}
-      title="Upload history"><i class="fa fa-upload" /></button>
-    {#if $historyStore.length > 0}
-      <button
-        id="downloadHistory"
-        class="btn btn-secondary btn-xs w-12"
-        on:click|stopPropagation={() => downloadHistory()}
-        title="Download history"><i class="fa fa-download" /></button>
-    {/if}
-    |
-    <button
-      id="saveHistory"
-      class="btn btn-success btn-xs w-12"
-      on:click|stopPropagation={() => saveHistory()}
-      title="Save current state"><i class="far fa-save" /></button>
-    {#if $historyModeStore !== 'loader'}
-      <button
-        id="clearHistory"
-        class="btn btn-error btn-xs w-12"
-        on:click|stopPropagation={() => clearHistory()}
-        title="Delete all saved states"><i class="fas fa-trash-alt" /></button>
-    {/if}
-  </div>
-  <ul class="h-56 space-y-2 overflow-auto p-2" id="historyList">
-    {#if $historyStore.length > 0}
-      {#each $historyStore as { id, state, time, name, url, type }}
-        <li class="flex-col rounded p-2 shadow">
-          <div class="flex">
-            <div class="flex-1">
-              <div class="flex flex-col text-base-content">
-                {#if url}
-                  <a
-                    href={url}
-                    target="_blank"
-                    title="Open revision in new tab"
-                    class="text-blue-500 hover:underline">{name}</a>
-                {:else}
-                  <span>{name}</span>
-                {/if}
-                <span class="text-sm text-gray-400">{relativeTime(time)}</span>
-              </div>
+<Card onselect={tabSelectHandler} isOpen isClosable={false} {tabs} activeTabID={historyState.mode}>
+  {#snippet actions()}
+    <div class="flex items-center gap-2">
+      <Button
+        size="icon"
+        variant="ghost"
+        id="uploadHistory"
+        onclick={uploadHistory}
+        title="Upload history"><UploadIcon /></Button>
+      {#if historyState.entries.length > 0}
+        <Button
+          id="downloadHistory"
+          size="icon"
+          variant="ghost"
+          onclick={downloadHistory}
+          title="Download history"><DownloadIcon /></Button>
+      {/if}
+      <Separator orientation="vertical" />
+      <Button
+        id="saveHistory"
+        size="icon"
+        variant="ghost"
+        onclick={saveHistory}
+        title="Save current state"><SaveIcon /></Button>
+      {#if historyState.mode !== 'loader'}
+        <Button
+          id="clearHistory"
+          size="icon"
+          variant="ghost"
+          class="hover:text-destructive"
+          onclick={clearAll}
+          title="Delete all saved states"><TrashAltIcon /></Button>
+      {/if}
+    </div>
+  {/snippet}
+  <ul class="flex h-full min-w-fit flex-col gap-2 overflow-auto p-2" id="historyList">
+    {#if entriesWithUrl.length > 0}
+      {#each entriesWithUrl as { id, state, time, name, url, type, openUrl } (id)}
+        <li class="flex flex-col gap-2">
+          <div class="flex items-center justify-between">
+            <div class="flex flex-col">
+              {#if url}
+                <a
+                  href={url}
+                  target="_blank"
+                  title="Open revision in new tab"
+                  class="text-blue-500 hover:underline">{name}</a>
+              {:else}
+                <span class="whitespace-nowrap">{name}</span>
+              {/if}
+              <span class="text-xs whitespace-nowrap text-primary-foreground/30">
+                {new Date(time).toLocaleString()}
+              </span>
             </div>
-            <div class="flex content-center gap-2">
-              <button class="btn btn-success" on:click={() => restoreHistoryItem(state)}
-                ><i class="fas fa-undo mr-1" />Restore</button>
+
+            <div class="flex items-center gap-2">
+              <span class="text-sm whitespace-nowrap text-primary-foreground/50">
+                {dayjs(time).fromNow()}
+              </span>
+              <Button
+                href={openUrl}
+                target="_blank"
+                rel="noopener"
+                size="icon"
+                variant="ghost"
+                title="Open in new tab">
+                <OpenInNewIcon />
+              </Button>
+              <Button
+                size="icon"
+                variant="ghost"
+                title="Restore this version"
+                onclick={() => restoreHistoryItem(state)}>
+                <UndoIcon />
+              </Button>
               {#if type !== 'loader'}
-                <button class="btn btn-error" on:click={() => clearHistory(id)}
-                  ><i class="fas fa-trash-alt mr-1" />Delete</button>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  class="hover:text-destructive"
+                  title="Delete this version"
+                  onclick={() => removeEntry(id)}>
+                  <TrashAltIcon />
+                </Button>
               {/if}
             </div>
           </div>
+          <Separator />
         </li>
       {/each}
     {:else}
-      <div class="m-2">
-        No items in History<br />
-        Click the Save button to save current state and restore it later.<br />
-        Timeline will automatically be saved every minute.
-      </div>
+      <div class="m-2 text-center whitespace-pre-line">{emptyMessage}</div>
     {/if}
   </ul>
 </Card>

@@ -1,133 +1,83 @@
-<script lang="ts" context="module">
-  declare global {
-    interface Window {
-      Cypress: boolean;
-      editorLoaded: boolean;
-    }
-  }
-</script>
-
 <script lang="ts">
-  import type { EditorMode } from '$lib/types';
-  import { stateStore, updateCode, updateConfig } from '$lib/util/state';
-  import { themeStore } from '$lib/util/theme';
-  import { errorDebug, syncDiagram } from '$lib/util/util';
-  import * as monaco from 'monaco-editor';
-  import monacoJsonWorker from 'monaco-editor/esm/vs/language/json/json.worker?worker';
-  import monacoEditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
-  import { onMount } from 'svelte';
-  import { initEditor } from '$lib/util/monacoExtra';
-  import { logEvent } from '$lib/util/stats';
+  import DesktopEditor from '$/components/DesktopEditor.svelte';
+  import McWrapper from '$/components/McWrapper.svelte';
+  import MermaidChartIcon from '$/components/MermaidChartIcon.svelte';
+  import MobileEditor from '$/components/MobileEditor.svelte';
+  import { Button } from '$/components/ui/button';
+  import { TID } from '$/constants';
+  import { env } from '$/util/env';
+  import { updateCode, updateConfig, urls, validatedState } from '$lib/util/state.svelte';
+  import { logMermaidChartClick } from '$lib/util/stats';
+  import { debounce } from 'lodash-es';
+  import ExclamationCircleIcon from '~icons/material-symbols/error-outline-rounded';
 
-  let divElement: HTMLDivElement | undefined;
-  let editor: monaco.editor.IStandaloneCodeEditor | undefined;
-  let editorOptions: monaco.editor.IStandaloneEditorConstructionOptions = {
-    minimap: {
-      enabled: false
-    },
-    theme: 'mermaid',
-    overviewRulerLanes: 0
-  };
-  let text = '';
-
-  stateStore.subscribe(({ errorMarkers, editorMode, code, mermaid }) => {
-    // console.log('editor store subscription', { code, mermaid });
-    if (!editor) {
-      return;
-    }
-
-    // Update editor text if it's different
-    const newText = editorMode === 'code' ? code : mermaid;
-    if (newText !== text) {
-      // console.log('updating editor text', newText);
-      editor.setScrollTop(0);
-      editor.setValue(newText);
-      text = newText;
-    }
-
-    // Update editor mode if it's different
-    const language = editorMode === 'code' ? 'mermaid' : 'json';
-    const model = editor.getModel();
-    if (!model) {
-      console.error("editor model doesn't exist");
-      return;
-    }
-    if (model.getLanguageId() !== language) {
-      monaco.editor.setModelLanguage(model, language);
-    }
-
-    // Display/clear errors
-    monaco.editor.setModelMarkers(model, 'mermaid', errorMarkers);
-  });
-
-  themeStore.subscribe(({ isDark }) => {
-    editor && monaco.editor.setTheme(isDark ? 'mermaid-dark' : 'mermaid');
-  });
-
-  const handleUpdate = (text: string, mode: EditorMode) => {
-    // console.log('editor HandleUpdate', { text, mode });
-    if (mode === 'code') {
+  const { isMobile } = $props<{ isMobile: boolean }>();
+  const onUpdate = (text: string) => {
+    if (validatedState.current.editorMode === 'code') {
       updateCode(text);
     } else {
       updateConfig(text);
     }
   };
 
-  onMount(() => {
-    self.MonacoEnvironment = {
-      getWorker(_, label) {
-        if (label === 'json') {
-          return new monacoJsonWorker();
-        }
-        return new monacoEditorWorker();
-      }
-    };
+  let showError = $state(false);
 
-    if (!divElement) {
-      throw new Error('divEl is undefined');
-    }
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-call
-    initEditor(monaco);
-    errorDebug();
-    editor = monaco.editor.create(divElement, editorOptions);
-    editor.onDidChangeModelContent(({ isFlush }) => {
-      const newText = editor?.getValue();
-      if (!newText || text === newText || isFlush) {
-        return;
-      }
-      text = newText;
-      handleUpdate(text, $stateStore.editorMode);
-    });
-    editor.addAction({
-      id: 'mermaid-render-diagram',
-      label: 'Render Diagram',
-      keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter],
-      run: function () {
-        syncDiagram();
-        logEvent('renderDiagram', {
-          method: 'keyboardShortcut'
-        });
-      }
-    });
-    monaco.editor.setTheme($themeStore.isDark ? 'mermaid-dark' : 'mermaid');
-    const resizeObserver = new ResizeObserver((entries) => {
-      editor?.layout({
-        height: entries[0].contentRect.height,
-        width: entries[0].contentRect.width
-      });
-    });
+  const showErrorDebounced = debounce(() => {
+    showError = true;
+  }, 3000);
 
-    if (divElement.parentElement) {
-      resizeObserver.observe(divElement.parentElement);
+  $effect(() => {
+    if (validatedState.current.error) {
+      showErrorDebounced();
+    } else {
+      showErrorDebounced.cancel();
+      showError = false;
     }
 
-    if (window.Cypress) {
-      window.editorLoaded = true;
-    }
     return () => {
-      editor?.dispose();
+      showErrorDebounced.cancel();
     };
   });
 </script>
 
-<div bind:this={divElement} id="editor" class="overflow-hidden" />
+<div class="flex h-full flex-col">
+  {#if isMobile}
+    <MobileEditor {onUpdate} />
+  {:else}
+    <DesktopEditor {onUpdate} />
+  {/if}
+  {#if showError && validatedState.current.error instanceof Error}
+    <div class="flex flex-col text-sm" data-testid={TID.errorContainer}>
+      <div class="flex items-center justify-between gap-2 bg-slate-900 p-2 text-white">
+        <div class="flex w-fit items-center gap-2">
+          <ExclamationCircleIcon class="size-6 text-destructive" aria-hidden="true" />
+          <div class="flex flex-col">
+            <p>Syntax error</p>
+            {#if env.isEnabledMermaidChartLinks && validatedState.current.editorMode === 'code'}
+              <p class="text-xs text-white/60" data-testid={TID.aiHelpText}>
+                Create a free account to repair with AI
+              </p>
+            {/if}
+          </div>
+        </div>
+        {#if validatedState.current.editorMode === 'code'}
+          <McWrapper>
+            <Button
+              variant="accent"
+              size="sm"
+              data-testid={TID.aiRepairButton}
+              href={urls.current.mermaidChart({ medium: 'ai_repair' }).save}
+              target="_blank"
+              onclick={() => logMermaidChartClick('aiRepair')}>
+              <MermaidChartIcon />
+              AI Repair
+            </Button>
+          </McWrapper>
+        {/if}
+      </div>
+      <output class="max-h-32 overflow-auto bg-muted p-2" name="mermaid-error" for="editor">
+        <pre>{validatedState.current.error?.toString()}</pre>
+      </output>
+    </div>
+  {/if}
+</div>
