@@ -1,113 +1,111 @@
 import { browser } from '$app/environment';
-import { env } from './env';
 import type PlausibleInstance from 'plausible-tracker';
+import { env } from './env';
+
 export let plausible: ReturnType<typeof PlausibleInstance> | undefined;
 
 export const initAnalytics = async (): Promise<void> => {
-  if (browser && !plausible) {
-    try {
-      const { default: Plausible } = await import('plausible-tracker');
-      plausible = Plausible({
-        domain: env.domain,
-        hashMode: false,
-        // All tracked stats are public and available at https://p.mermaid.live/mermaid.live
-        apiHost: env.analyticsUrl
-      });
-    } catch (error) {
-      console.log(error);
-      console.info('Analytics blocked ;)');
-    }
+  if (!env.analyticsUrl || !browser || plausible) {
+    return;
+  }
+
+  try {
+    const { default: Plausible } = await import('plausible-tracker');
+    plausible = Plausible({
+      // All tracked stats are public and available at https://p.mermaid.live/mermaid.live
+      apiHost: env.analyticsUrl,
+      domain: env.domain,
+      hashMode: false
+    });
+  } catch (error) {
+    console.log(error);
+    console.info('Analytics blocked ;)');
   }
 };
 
-export const detectType = (text: string): string | undefined => {
-  const possibleDiagramTypes = [
-    'classDiagram',
-    'erDiagram',
-    'flowChart',
-    'gantt',
-    'gitGraph',
-    'graph',
-    'journey',
-    'pie',
-    'stateDiagram',
-    'quadrantChart',
-    'mindmap'
-  ];
-  const firstLine = text
-    .replaceAll(/^\s*%%.*\n/g, '\n')
-    .trimStart()
-    .split(' ')[0]
-    .toLowerCase();
-  const detectedDiagram = possibleDiagramTypes.find((d) => firstLine.includes(d.toLowerCase()));
-  return detectedDiagram;
+/**
+ * Build the current page URL for analytics tracking.
+ * Includes origin, pathname, and search (for UTM params),
+ * but never the hash (which contains diagram data).
+ */
+export const getAnalyticsSafeUrl = (): string => {
+  return window.location.origin + window.location.pathname + window.location.search;
 };
 
 export const countLines = (code: string): number => {
   return (code.match(/\n/g)?.length ?? 0) + 1;
 };
 
-export const saveStatistics = (graph: string, renderTime: number): void => {
-  const graphType = detectType(graph);
-  if (!graphType) {
+export const saveStatistics = ({
+  code,
+  renderTime,
+  isRough,
+  diagramType
+}: {
+  code: string;
+  renderTime: number;
+  isRough: boolean;
+  diagramType?: string;
+}): void => {
+  if (!diagramType) {
     return;
   }
-  const length = countLines(graph);
+  const length = countLines(code);
   const lengthBucket = getBucket(length);
   const renderTimeMsBucket = getBucket(renderTime);
-  logEvent('render', { graphType, length, lengthBucket, renderTimeMsBucket });
+  logEvent('render', { diagramType, isRough, lengthBucket, renderTimeMsBucket });
 };
 
 const getBucket = (length: number): string => {
-  return length < 10
-    ? '0-10'
-    : length < 25
-      ? '10-25'
-      : length < 50
-        ? '25-50'
-        : length < 100
-          ? '50-100'
-          : length < 200
-            ? '100-200'
-            : length < 500
-              ? '200-500'
-              : length < 700
-                ? '500-700'
-                : length < 1000
-                  ? '700-1000'
-                  : length < 1500
-                    ? '1000-1500'
-                    : length < 2500
-                      ? '1500-2500'
-                      : length < 4500
-                        ? '2500-4500'
-                        : length < 7000
-                          ? '4500-7000'
-                          : length < 10_000
-                            ? '7000-10000'
-                            : '10000+';
+  const buckets = [
+    [10, '0-10'],
+    [25, '10-25'],
+    [50, '25-50'],
+    [100, '50-100'],
+    [200, '100-200'],
+    [500, '200-500'],
+    [700, '500-700'],
+    [1000, '700-1000'],
+    [1500, '1000-1500'],
+    [2500, '1500-2500'],
+    [4500, '2500-4500'],
+    [7000, '4500-7000'],
+    [10_000, '7000-10000']
+  ] as const;
+
+  for (const [threshold, label] of buckets) {
+    if (length < threshold) {
+      return label;
+    }
+  }
+
+  return '10000+';
 };
 
 const minutesToMilliSeconds = (minutes: number): number => {
   return minutes * 60_000;
 };
 
+const noDelay = 0;
 const defaultDelay = minutesToMilliSeconds(1);
 const delaysPerEvent = {
-  render: minutesToMilliSeconds(5),
-  panZoom: minutesToMilliSeconds(10),
+  bannerClick: noDelay,
+  chooseEditor: noDelay,
   copyClipboard: defaultDelay,
-  download: defaultDelay,
   copyMarkdown: defaultDelay,
+  download: defaultDelay,
+  history: defaultDelay,
   loadGist: defaultDelay,
   loadSampleDiagram: defaultDelay,
-  renderDiagram: defaultDelay,
-  history: defaultDelay,
+  mermaidChartClick: noDelay,
   migration: defaultDelay,
+  mobileViewToggle: defaultDelay,
+  pwaInstalled: defaultDelay,
+  render: minutesToMilliSeconds(5),
+  renderDiagram: defaultDelay,
   themeChange: defaultDelay,
-  bannerClick: defaultDelay,
   version: defaultDelay
-};
+} as const;
 export type AnalyticsEvent = keyof typeof delaysPerEvent;
 const timeouts: Map<string, number> = new Map<string, number>();
 // manual debounce to reduce the number of events sent to analytics
@@ -115,21 +113,24 @@ export const logEvent = (
   name: AnalyticsEvent,
   data?: Record<string, string | number | boolean>
 ): void => {
+  if (browser && window.location.hostname === 'localhost') {
+    console.log('[plausible]', name, data);
+  }
   if (!plausible) {
     return;
   }
-  const key = data ? JSON.stringify({ name, data }) : name;
+  const key = data ? JSON.stringify({ data, name }) : name;
   if (timeouts.has(key)) {
     clearTimeout(timeouts.get(key));
   } else {
-    plausible.trackEvent(
-      name,
-      { props: data },
-      { url: window.location.origin + window.location.pathname }
-    );
+    plausible.trackEvent(name, { props: data }, { url: getAnalyticsSafeUrl() });
   }
   timeouts.set(
     key,
     window.setTimeout(() => timeouts.delete(key), delaysPerEvent[name])
   );
+};
+
+export const logMermaidChartClick = (source: string): void => {
+  logEvent('mermaidChartClick', { source });
 };
